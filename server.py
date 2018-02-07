@@ -3,8 +3,9 @@ from flask_restful import Resource, Api
 from sqlalchemy import create_engine
 from flask.ext.jsonpify import jsonify
 import hashlib as hasher
-import time
-import urllib.request
+import time, urllib.request, socket
+
+print(socket.gethostbyname(socket.gethostname()))
 
 db_connect = create_engine('sqlite:///chinook.db')
 app = Flask(__name__)
@@ -19,25 +20,35 @@ class AddTransaction(Resource):
         From = request.json['from']
         To = request.json['to']
         Amount = request.json['amount']
-        conn.execute("insert into transactions values(null,'{0}','{1}','{2}')".format(From,To,Amount))
+        conn.execute("insert into transactions values(null,'{0}','{1}','{2}')".format(From, To, Amount))
         number_of_data = conn.execute("SELECT COUNT (*) AS number FROM transactions")
         for row in number_of_data:
             if row["number"] % 5 == 0:
                 create_block()
-        return {'status': 'success'}
+        return {
+            'success': True,
+            'status': 'block created',
+            'message': 'Transaction has been added'
+        }
 
 
 class GetBlocks(Resource):
     """Return list of "N" last blocks. Use http://127.0.0.1:5002/last_blocks/N"""
+
     def get(self, number_of_blocks):
         conn = db_connect.connect()
-        query = conn.execute("SELECT * FROM blocks ORDER BY ts DESC limit %d" % int(number_of_blocks))
-        result = {'data': [dict(zip(tuple(query.keys()), i)) for i in query.cursor]}
+        query = conn.execute("SELECT * FROM blocks ORDER BY ts DESC limit {}".format(number_of_blocks))
+        result = [dict(zip(tuple(query.keys()), i)) for i in query.cursor]
         return jsonify(result)
 
-class ManagementStatus(Resource):
+
+class ManagementState(Resource):
     def get(self):
-        result = {'id':80,'name':'DmytroR','last_hash':get_last_hash(),'neighbours':get_neighbours(),'url':'192.168.44.80:5002'}
+        result = {'id': get_my_ip().split(".")[3],
+                  'name': 'DmytroR',
+                  'last_hash': get_last_hash(),
+                  'neighbours': get_neighbours(),
+                  'url': get_my_ip() + ':5002'}
         return jsonify(result)
 
 
@@ -56,7 +67,11 @@ class ManagementAddLink(Resource):
         Id = request.json['id']
         Url = request.json['url']
         conn.execute("insert into links values('{0}','{1}')".format(Id, Url))
-        return {'status': 'success'}
+        return {
+            'success': True,
+            'status': 'link added',
+            'message': 'New link has been added'
+        }
 
 
 class BlockchainReceiveUpdate(Resource):
@@ -69,17 +84,19 @@ class BlockchainReceiveUpdate(Resource):
 def create_block():
     """Create any NOT genesis block"""
     data = "["
+    txs_for_hash = ""
     conn = db_connect.connect()
     previous = get_last_hash();
     data_conn = conn.execute(
         "SELECT tx_from, tx_to, tx_amount FROM (SELECT * FROM transactions ORDER BY tx_id DESC limit 5) ORDER BY tx_id ASC")
     for row in data_conn:
         data += "{from:" + row['tx_from'] + ",to:" + row["tx_to"] + ",amount:" + str(row["tx_amount"]) + "},"
-    data +="]"
+        txs_for_hash += row['tx_from'] + row["tx_to"] + str(row["tx_amount"])
+    data = data[:-1] + "]"
     timestamp = int(time.time())
-    hash = hash_block(timestamp, data, previous)
+    hash = hash_block(previous, timestamp, txs_for_hash)
     conn.execute("insert into blocks values('{0}','{1}','{2}','{3}')"
-                         .format(previous, hash, timestamp, data))
+                 .format(previous, hash, timestamp, data))
 
 
 def get_last_hash():
@@ -99,11 +116,12 @@ def get_neighbours():
     return neighbours
 
 
-def hash_block(timestamp, data, previous):
+def hash_block(previous, timestamp, txs_for_hash):
     """Create hash (sha256) for given block"""
     sha = hasher.sha256()
-    sha.update((str(timestamp) + str(data) + str(previous)).encode('utf-8'))
+    sha.update((str(previous) + str(timestamp) + str(txs_for_hash)).encode('utf-8'))
     return sha.hexdigest()
+
 
 def create_genesis_block():
     """Create initial "genesis" block"""
@@ -126,11 +144,16 @@ def sync_from():
     urllib.request.urlopen(url + "/management/sync").read()
 
 
+def get_my_ip():
+    return socket.gethostbyname(socket.gethostname())
+
+
 api.add_resource(GetBlocks, '/blockchain/get_blocks/<number_of_blocks>')  # Route_1
 api.add_resource(AddTransaction, '/management/add_transaction')  # Route_2
 api.add_resource(ManagementAddLink, '/management/add_link')  # Route_3
-api.add_resource(ManagementStatus, '/management/status')  # Route_4
+api.add_resource(ManagementState, '/management/state')  # Route_4
 api.add_resource(ManagementSync, '/management/sync')  # Route_5
+api.add_resource(BlockchainReceiveUpdate, '/blockchain/receive_update')  # Route_6
 
 # check does any block exist and create genesis block if not
 conn = db_connect.connect()
@@ -139,7 +162,7 @@ for row in number_of_blocks:
     if row["number"] == 0:
         create_genesis_block()
 
-sync_from
+sync_from()
 
 if __name__ == '__main__':
-    app.run(host= '0.0.0.0', port=5002)
+    app.run(host='0.0.0.0', port=5002)
